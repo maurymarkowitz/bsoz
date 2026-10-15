@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "rom.h"
+#include "../bsoz_loader.h"
 
 int k = 0x15; /* pending key from hexpad */
 int c = -1;   /* pending char from tty */
@@ -210,16 +211,42 @@ void display(int n, uint8_t b) {
 }
 
 int main(int argc, char *argv[]) {
-  (void)argc;
-  (void)argv;
+  struct load_config loader_config;
+  bool exclude_args[256] = {false};
+  uint16_t start_addr = 0xFFFF;
+
+  /* Initialize loader config */
+  load_config_init(&loader_config);
+
+  /* Parse custom file loading arguments */
+  if (parse_load_args(argc, argv, &loader_config, exclude_args) != 0) {
+    fprintf(stderr, "Error parsing file arguments\n");
+    return 1;
+  }
 
   set_raw();
   atexit(reset_term);
   fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
+  /* Load files from configuration */
+  if (load_files(mem, &loader_config) != 0) {
+    fprintf(stderr, "Error loading files\n");
+    load_config_free(&loader_config);
+    return 1;
+  }
+
+  /* Get startup address from loader config, or use reset vector */
+  start_addr = get_startup_addr(&cpu, &loader_config);
+
   mem[0x17fa] = mem[0x17fe] = 0;
   mem[0x17fb] = mem[0x17ff] = 0x1c;
-  rst(&cpu);
+
+  if (start_addr != 0xFFFF) {
+    cpu.pc = start_addr;
+  } else {
+    rst(&cpu);
+  }
+
   for (;;) {
     hexpad();
     tty();
@@ -233,7 +260,12 @@ int main(int argc, char *argv[]) {
       cpu.pc = 0x1f5e;
     }
 
-    if ((step(&cpu)) < 0) { return 1; }
+    if ((step(&cpu)) < 0) {
+      load_config_free(&loader_config);
+      return 1;
+    }
   }
+
+  load_config_free(&loader_config);
   return 0;
 }

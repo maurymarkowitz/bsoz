@@ -3,8 +3,10 @@
 
 #include <stdio.h>
 
+struct cpu;
+
 void dump(struct cpu *cpu) {
-  // clang-format on
+  /* clang-format on */
   printf(
       "A:%02x  X:%02x  Y:%02x  S:%02x[%02x %02x %02x %02x]  "
       "F:%02x[%c%c%c%c%c%c%c%c]  PC:%04x ",
@@ -15,7 +17,7 @@ void dump(struct cpu *cpu) {
       cpu->f & 0x10 ? 'B' : '.', cpu->f & 0x08 ? 'D' : '.',
       cpu->f & 0x84 ? 'I' : '.', cpu->f & 0x82 ? 'Z' : '.',
       cpu->f & 0x81 ? 'C' : '.', cpu->pc - 1);
-  // clang-format on
+  /* clang-format on */
 }
 
 uint8_t disasm(struct cpu *c, uint8_t op) {

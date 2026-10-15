@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "rom.h"
+#include "../bsoz_loader.h"
 
 uint8_t mem[0x10000];
 uint16_t memsz = 0xffff;
@@ -85,13 +86,44 @@ void reset_term(void) {
 int main(int argc, char *argv[]) {
   int c;
   struct cpu cpu = {0};
+  struct load_config loader_config;
+  bool exclude_args[256] = {false};
+  uint16_t start_addr = 0xFFFF;
 
-  while ((c = getopt(argc, argv, "48")) != -1) {
+  /* Initialize loader config */
+  load_config_init(&loader_config);
+
+  /* Parse custom file loading arguments */
+  if (parse_load_args(argc, argv, &loader_config, exclude_args) != 0) {
+    fprintf(stderr, "Error parsing file arguments\n");
+    return 1;
+  }
+
+  while ((c = getopt(argc, argv, "48l:")) != -1) {
     switch (c) {
       case '4': memsz = 4096; break;
       case '8': memsz = 8192; break;
+      case 'l': {
+        char path[512];
+        uint16_t address;
+        if (parse_file_spec(optarg, path, sizeof(path), &address) != 0) {
+          fprintf(stderr, "Invalid file spec: %s\n", optarg);
+          return 1;
+        }
+        if (load_config_add_file(&loader_config, path, address) != 0) {
+          fprintf(stderr, "Error adding file: %s\n", path);
+          return 1;
+        }
+        break;
+      }
       case '?':
-      default:  fprintf(stderr, "USAGE: %s [-4|-8] <rom>\n", argv[0]); exit(1);
+      default:
+        fprintf(stderr, "USAGE: %s [-4|-8] [-l file[@addr]|file[@addr] ...]\n", argv[0]);
+        fprintf(stderr, "       -4        Use 4K memory\n");
+        fprintf(stderr, "       -8        Use 8K memory\n");
+        fprintf(stderr, "       -l FILE   Load FILE (optionally at address after @)\n");
+        load_config_free(&loader_config);
+        exit(1);
     }
   }
 
@@ -99,6 +131,7 @@ int main(int argc, char *argv[]) {
     FILE *f = fopen(argv[optind], "r");
     if (f == NULL) {
       perror(argv[1]);
+      load_config_free(&loader_config);
       return 1;
     }
     fseek(f, 0, SEEK_END);
@@ -107,20 +140,36 @@ int main(int argc, char *argv[]) {
     fseek(f, 0, SEEK_SET);
     if (fread(pre, presz, 1, f) < 1) {
       perror(argv[1]);
+      load_config_free(&loader_config);
       return 1;
     }
     fclose(f);
   }
 
+  /* Load files from configuration */
+  if (load_files(mem, &loader_config) != 0) {
+    fprintf(stderr, "Error loading files\n");
+    load_config_free(&loader_config);
+    return 1;
+  }
+
+  /* Get startup address from loader config, or use reset vector */
+  start_addr = get_startup_addr(&cpu, &loader_config);
+
   set_raw();
   atexit(reset_term);
   fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
-  rst(&cpu);
+  if (start_addr != 0xFFFF) {
+    cpu.pc = start_addr;
+  } else {
+    rst(&cpu);
+  }
   for (;;) {
     int op;
     if ((op = step(&cpu)) < 0) {
       printf("invalid instruction %02x at pc=%04x\n", op, cpu.pc);
+      load_config_free(&loader_config);
       return 1;
     }
     if (!ch && preidx < presz) ch = pre[preidx++];
@@ -128,10 +177,16 @@ int main(int argc, char *argv[]) {
       if (ch == 0x08 || ch == 0x7f) {
         ch = 0x5F;
       } else if (ch == '') {
-        rst(&cpu);
+        if (start_addr != 0xFFFF) {
+          cpu.pc = start_addr;
+        } else {
+          rst(&cpu);
+        }
         ch = 0;
       }
     }
   }
+
+  load_config_free(&loader_config);
   return 0;
 }
