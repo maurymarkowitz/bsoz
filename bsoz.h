@@ -16,6 +16,9 @@ extern struct cpu_stats step_stats;
 /* Debug flag - set to 1 to enable debug output at runtime */
 extern int debug_enabled;
 
+/* Terminal capture flag - set to 1 to log serial I/O to stdout */
+extern int terminal_enabled;
+
 struct cpu {
   uint8_t a, x, y, s, f;
   uint16_t pc;

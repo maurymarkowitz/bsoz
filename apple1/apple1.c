@@ -12,6 +12,7 @@
 #include "../bsoz_args.h"
 
 int debug_enabled = 0;
+int terminal_enabled = 0;
 
 uint8_t mem[0x10000];
 uint16_t memsz = 0xffff;
@@ -33,6 +34,10 @@ uint8_t r8(struct cpu *c, uint16_t addr) {
       uint8_t tchar = ch;
       if (tchar >= 'a' && tchar <= 'z') { tchar = tchar - 'a' + 'A'; }
       if (tchar == '\n') tchar = '\r';
+      if (terminal_enabled) {
+        fprintf(stdout, "[RX: %02X '%c'] ", ch, (ch >= 32 && ch < 127) ? ch : '?');
+        fflush(stdout);
+      }
       ch = 0;
       return tchar | 0x80;
     }
@@ -48,6 +53,9 @@ uint8_t w8(struct cpu *c, uint16_t addr, uint8_t b) {
   (void)c;
   if (addr == 0xd012 || addr == 0xd0f2) {
     char o = b & 0x7f;
+    if (terminal_enabled) {
+      fprintf(stdout, "[TX: %02X '%c'] ", b & 0x7f, (o >= 32 && o < 127) ? o : '?');
+    }
     col++;
     if (o == '\r') {
       o = '\n';
@@ -100,6 +108,9 @@ int main(int argc, char *argv[]) {
 
   /* Enable debug output if --debug or -d flag is present */
   debug_enabled = has_debug_flag(argc, argv);
+
+  /* Enable terminal capture if --terminal or -t flag is present */
+  terminal_enabled = has_terminal_flag(argc, argv);
 
   /* Initialize loader config */
   load_config_init(&loader_config);

@@ -14,6 +14,7 @@
 #include "../bsoz_args.h"
 
 int debug_enabled = 0;
+int terminal_enabled = 0;
 
 int k = 0x15; /* pending key from hexpad */
 int c = -1;   /* pending char from tty */
@@ -234,6 +235,10 @@ void tty(void) {
     serial.rx_count = 0;
     serial.rx_busy = 1;
     serial.baud_clk = 0;
+    if (terminal_enabled) {
+      fprintf(stdout, "[RX: %02X '%c'] ", c, (c >= 32 && c < 127) ? c : '?');
+      fflush(stdout);
+    }
     c = -1;
   }
 
@@ -257,6 +262,11 @@ void tty(void) {
       serial.tx_count++;
     } else {
       serial.tx_busy = 0;
+      if (terminal_enabled) {
+        fprintf(stdout, "[TX: %02X '%c'] ", serial.tx_buf, 
+                (serial.tx_buf >= 32 && serial.tx_buf < 127) ? serial.tx_buf : '?');
+        fflush(stdout);
+      }
     }
   }
 
@@ -309,6 +319,9 @@ int main(int argc, char *argv[]) {
 
   /* Enable debug output if --debug or -d flag is present */
   debug_enabled = has_debug_flag(argc, argv);
+
+  /* Enable terminal capture if --terminal or -t flag is present */
+  terminal_enabled = has_terminal_flag(argc, argv);
 
   /* Initialize loader config */
   load_config_init(&loader_config);
