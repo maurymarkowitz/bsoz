@@ -3,6 +3,16 @@
 
 #include <stdint.h> /* for uint8_t and uint16_t */
 
+/* Statistics collection framework - compile with -DENABLE_STATS=1 to enable */
+#ifndef ENABLE_STATS
+#define ENABLE_STATS 0
+#endif
+
+#if ENABLE_STATS
+#include "bsoz_stats.h"
+extern struct cpu_stats step_stats;
+#endif
+
 struct cpu {
   uint8_t a, x, y, s, f;
   uint16_t pc;
@@ -319,6 +329,12 @@ int step(struct cpu *c) {
 
     default: return -1;
   }
+  
+  /* Update statistics if enabled */
+#if ENABLE_STATS
+  cpu_stats_update(&step_stats, op, get_opcode_cycles(op));
+#endif
+  
   return op;
 }
 #endif /* BSOZ_H */

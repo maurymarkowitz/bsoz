@@ -1,3 +1,7 @@
-apple1/apple1
-test/test
+test/
 plans/
+.DS_Store
+apple1/apple1
+apple1/apple1_debug
+kim1/kim1
+kim1/kim1_debug

@@ -1,3 +1,14 @@
+/*
+ * File Loader Header
+ *
+ * This header provides functionality to load binary files into emulated
+ * memory at specified addresses from the command line. Supports multiple
+ * formats:
+ *   - RAW binary (explicit address required)
+ *   - PRG (Commodore format: 2-byte address header + data)
+ *   - HEX (Intel HEX format: ASCII text with address/checksum records)
+ */
+
 #ifndef BSOZ_LOADER_H
 #define BSOZ_LOADER_H
 
@@ -6,21 +17,23 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
-
-/*
- * File Loader Header
- *
- * This header provides functionality to load binary files into emulated
- * memory at specified addresses from the command line. Supports both
- * positional arguments (FILE@ADDRESS) and option syntax (--load FILE@ADDRESS).
- */
+#include <ctype.h>
 
 /* Forward declaration of struct cpu from bsoz.h */
 struct cpu;
 
+/* File format enumeration */
+typedef enum {
+  FORMAT_AUTO,   /* Detect format from extension */
+  FORMAT_RAW,    /* Raw binary data */
+  FORMAT_PRG,    /* Commodore PRG format */
+  FORMAT_HEX     /* Intel HEX format */
+} file_format_t;
+
 struct file_load {
   char *path;        /* path to file */
-  uint16_t address;  /* load address */
+  uint16_t address;  /* load address (used for RAW format) */
+  file_format_t fmt; /* file format */
 };
 
 struct load_config {
@@ -30,6 +43,259 @@ struct load_config {
   bool use_reset_vector;        /* if false, use start_addr */
   bool auto_run;                /* if true, start execution immediately */
 };
+
+/**
+ * Detect file format from extension or magic bytes
+ *
+ * Args:
+ *   path: file path
+ *   fmt: format hint (FORMAT_AUTO to detect)
+ *
+ * Returns:
+ *   Detected format (FORMAT_RAW if detection fails)
+ */
+static file_format_t detect_format(const char *path, file_format_t fmt) {
+  if (fmt != FORMAT_AUTO) {
+    return fmt;
+  }
+
+  /* Check file extension */
+  const char *dot = strrchr(path, '.');
+  if (dot) {
+    if (strcmp(dot, ".prg") == 0) return FORMAT_PRG;
+    if (strcmp(dot, ".PRG") == 0) return FORMAT_PRG;
+    if (strcmp(dot, ".hex") == 0) return FORMAT_HEX;
+    if (strcmp(dot, ".HEX") == 0) return FORMAT_HEX;
+  }
+
+  return FORMAT_RAW;
+}
+
+/**
+ * Load PRG file (Commodore format: 2-byte LE address + data)
+ *
+ * Args:
+ *   f: open file handle
+ *   mem: memory array
+ *   path: file path (for error messages)
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+static int load_prg_file(FILE *f, uint8_t *mem, const char *path) {
+  /* Read 2-byte address header (little-endian) */
+  uint8_t addr_bytes[2];
+  if (fread(addr_bytes, 1, 2, f) != 2) {
+    fprintf(stderr, "Error: PRG file '%s' too short (need 2-byte address)\n",
+            path);
+    return -1;
+  }
+
+  uint16_t load_addr = addr_bytes[0] | (addr_bytes[1] << 8);
+
+  /* Read remaining file data */
+  fseek(f, 0, SEEK_END);
+  long file_size = ftell(f);
+  fseek(f, 2, SEEK_SET); /* Back to after address header */
+
+  long data_size = file_size - 2;
+  if (data_size < 0) {
+    fprintf(stderr, "Error: PRG file '%s' too short\n", path);
+    return -1;
+  }
+
+  uint32_t available = 65536 - load_addr;
+  if ((uint32_t)data_size > available) {
+    fprintf(stderr,
+            "Error: PRG file '%s' data (%ld bytes) exceeds available space at "
+            "address %u (%u bytes)\n",
+            path, data_size, load_addr, available);
+    return -1;
+  }
+
+  size_t bytes_read = fread(&mem[load_addr], 1, data_size, f);
+  if ((long)bytes_read != data_size) {
+    fprintf(stderr, "Error reading PRG file '%s': incomplete read\n", path);
+    return -1;
+  }
+
+  fprintf(stderr, "Loaded PRG '%s': %ld bytes at $%04X\n", path, data_size,
+          load_addr);
+  return 0;
+}
+
+/**
+ * Parse hexadecimal byte from string (no validation)
+ *
+ * Args:
+ *   str: pointer to 2 hex digits
+ *
+ * Returns:
+ *   Byte value
+ */
+static uint8_t hex_byte(const char *str) {
+  uint8_t val = 0;
+  for (int i = 0; i < 2; i++) {
+    val = (val << 4) | (isdigit(str[i]) ? (str[i] - '0')
+                                         : (toupper(str[i]) - 'A' + 10));
+  }
+  return val;
+}
+
+/**
+ * Validate and parse Intel HEX record
+ *
+ * Format: :LLAAAATTDD...CC
+ *   LL = byte count, AAAA = address, TT = record type,
+ *   DD... = data bytes, CC = checksum
+ *
+ * Args:
+ *   line: input line
+ *   out_data: output data buffer
+ *   out_len: output data length
+ *   out_addr: output address
+ *   out_type: output record type
+ *
+ * Returns:
+ *   0 on success, -1 on parse error
+ */
+static int parse_hex_record(const char *line, uint8_t *out_data,
+                            size_t *out_len, uint16_t *out_addr,
+                            uint8_t *out_type) {
+  if (!line || line[0] != ':' || strlen(line) < 11) {
+    return -1;
+  }
+
+  uint8_t byte_count = hex_byte(line + 1);
+  *out_addr = (hex_byte(line + 3) << 8) | hex_byte(line + 5);
+  *out_type = hex_byte(line + 7);
+
+  /* Validate line length */
+  size_t expected_len = 11 + (byte_count * 2);
+  if (strlen(line) < expected_len) {
+    return -1;
+  }
+
+  /* Calculate and verify checksum */
+  uint8_t checksum = byte_count + (*out_addr >> 8) + (*out_addr & 0xFF) +
+                     *out_type;
+  for (int i = 0; i < byte_count; i++) {
+    out_data[i] = hex_byte(line + 9 + (i * 2));
+    checksum += out_data[i];
+  }
+
+  uint8_t file_checksum = hex_byte(line + 9 + (byte_count * 2));
+  if ((uint8_t)(256 - checksum) != file_checksum) {
+    return -1; /* Checksum mismatch */
+  }
+
+  *out_len = byte_count;
+  return 0;
+}
+
+/**
+ * Load HEX file (Intel HEX format)
+ *
+ * Args:
+ *   f: open file handle
+ *   mem: memory array
+ *   path: file path (for error messages)
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+static int load_hex_file(FILE *f, uint8_t *mem, const char *path) {
+  char line[1024];
+  uint16_t extended_addr = 0;
+  int line_num = 0;
+  bool eof_seen = false;
+
+  while (fgets(line, sizeof(line), f) && !eof_seen) {
+    line_num++;
+
+    /* Strip trailing whitespace */
+    for (int i = strlen(line) - 1; i >= 0 && isspace(line[i]); i--) {
+      line[i] = '\0';
+    }
+
+    /* Skip empty lines */
+    if (strlen(line) == 0) continue;
+
+    uint8_t data[256];
+    size_t data_len;
+    uint16_t addr;
+    uint8_t rec_type;
+
+    if (parse_hex_record(line, data, &data_len, &addr, &rec_type) < 0) {
+      fprintf(stderr, "Error: HEX file '%s' line %d: invalid record\n", path,
+              line_num);
+      return -1;
+    }
+
+    switch (rec_type) {
+      case 0x00: /* Data record */
+      {
+        uint32_t full_addr = (extended_addr << 16) | addr;
+        if (full_addr > 0xFFFF) {
+          fprintf(stderr,
+                  "Error: HEX file '%s' line %d: address $%06X out of range\n",
+                  path, line_num, full_addr);
+          return -1;
+        }
+
+        uint32_t available = 65536 - full_addr;
+        if ((uint32_t)data_len > available) {
+          fprintf(stderr,
+                  "Error: HEX file '%s' line %d: data exceeds available space "
+                  "at $%04X\n",
+                  path, line_num, (uint16_t)full_addr);
+          return -1;
+        }
+
+        memcpy(&mem[full_addr], data, data_len);
+        break;
+      }
+
+      case 0x01: /* End of file */
+        eof_seen = true;
+        break;
+
+      case 0x02: /* Extended segment address (not typically used for 6502) */
+        if (data_len < 2) {
+          fprintf(stderr,
+                  "Error: HEX file '%s' line %d: invalid extended address "
+                  "record\n",
+                  path, line_num);
+          return -1;
+        }
+        extended_addr = (data[0] << 8) | data[1];
+        break;
+
+      case 0x04: /* Extended linear address (upper 16 bits) */
+        if (data_len < 2) {
+          fprintf(stderr,
+                  "Error: HEX file '%s' line %d: invalid extended address "
+                  "record\n",
+                  path, line_num);
+          return -1;
+        }
+        extended_addr = (data[0] << 8) | data[1];
+        break;
+
+      default:
+        /* Ignore unknown record types */
+        break;
+    }
+  }
+
+  if (!eof_seen) {
+    fprintf(stderr, "Warning: HEX file '%s' missing end-of-file record\n",
+            path);
+  }
+
+  fprintf(stderr, "Loaded HEX '%s': %d records parsed\n", path, line_num);
+  return 0;
+}
 
 /**
  * Initialize load configuration structure
@@ -54,13 +320,14 @@ void load_config_init(struct load_config *config) {
  * Args:
  *   config: pointer to load_config structure
  *   path: path to the file
- *   address: load address (0-65535)
+ *   address: load address (0-65535, used only for FORMAT_RAW)
+ *   fmt: file format (FORMAT_AUTO to auto-detect)
  *
  * Returns:
  *   0 on success, -1 on error
  */
 int load_config_add_file(struct load_config *config, const char *path,
-                         uint16_t address) {
+                         uint16_t address, file_format_t fmt) {
   if (!config || !path) {
     return -1;
   }
@@ -81,6 +348,7 @@ int load_config_add_file(struct load_config *config, const char *path,
 
   strcpy(config->files[config->file_count].path, path);
   config->files[config->file_count].address = address;
+  config->files[config->file_count].fmt = detect_format(path, fmt);
   config->file_count++;
 
   return 0;
@@ -270,7 +538,7 @@ int parse_load_args(int argc, char *argv[], struct load_config *config,
         address = (uint16_t)addr;
       }
 
-      if (load_config_add_file(config, path, address) < 0) {
+      if (load_config_add_file(config, path, address, FORMAT_AUTO) < 0) {
         return -1;
       }
     }
@@ -328,7 +596,7 @@ int parse_load_args(int argc, char *argv[], struct load_config *config,
         return -1;
       }
 
-      if (load_config_add_file(config, path, address) < 0) {
+      if (load_config_add_file(config, path, address, FORMAT_AUTO) < 0) {
         return -1;
       }
 
@@ -359,6 +627,7 @@ int load_files(uint8_t *mem, const struct load_config *config) {
   for (size_t i = 0; i < config->file_count; i++) {
     const char *path = config->files[i].path;
     uint16_t address = config->files[i].address;
+    file_format_t fmt = config->files[i].fmt;
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -366,38 +635,62 @@ int load_files(uint8_t *mem, const struct load_config *config) {
       return -1;
     }
 
-    /* Get file size */
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    int result = 0;
 
-    if (file_size < 0) {
-      perror(path);
-      fclose(f);
-      return -1;
-    }
+    switch (fmt) {
+      case FORMAT_PRG:
+        result = load_prg_file(f, mem, path);
+        break;
 
-    /* Check if file fits in memory */
-    uint32_t available = 65536 - address;
-    if ((uint32_t)file_size > available) {
-      fprintf(
-          stderr,
-          "Error: file '%s' (%ld bytes) exceeds available space at address "
-          "%u (%u bytes)\n",
-          path, file_size, address, available);
-      fclose(f);
-      return -1;
-    }
+      case FORMAT_HEX:
+        result = load_hex_file(f, mem, path);
+        break;
 
-    /* Read file into memory */
-    size_t bytes_read = fread(&mem[address], 1, file_size, f);
-    if ((long)bytes_read != file_size) {
-      fprintf(stderr, "Error reading file '%s': incomplete read\n", path);
-      fclose(f);
-      return -1;
+      case FORMAT_RAW:
+      case FORMAT_AUTO: /* Auto-detect failed, treat as RAW */
+      {
+        /* Get file size */
+        fseek(f, 0, SEEK_END);
+        long file_size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        if (file_size < 0) {
+          perror(path);
+          fclose(f);
+          return -1;
+        }
+
+        /* Check if file fits in memory */
+        uint32_t available = 65536 - address;
+        if ((uint32_t)file_size > available) {
+          fprintf(
+              stderr,
+              "Error: file '%s' (%ld bytes) exceeds available space at address "
+              "%u (%u bytes)\n",
+              path, file_size, address, available);
+          fclose(f);
+          return -1;
+        }
+
+        /* Read file into memory */
+        size_t bytes_read = fread(&mem[address], 1, file_size, f);
+        if ((long)bytes_read != file_size) {
+          fprintf(stderr, "Error reading file '%s': incomplete read\n", path);
+          fclose(f);
+          return -1;
+        }
+
+        fprintf(stderr, "Loaded RAW '%s': %ld bytes at $%04X\n", path, file_size,
+                address);
+        break;
+      }
     }
 
     fclose(f);
+
+    if (result < 0) {
+      return -1;
+    }
   }
 
   return 0;
@@ -411,24 +704,20 @@ int load_files(uint8_t *mem, const struct load_config *config) {
  *   config: load configuration
  *
  * Returns:
- *   Address to start execution from
+ *   0xFFFF if reset vector should be used, otherwise the startup address
  */
-uint16_t get_startup_addr(struct cpu *c, const struct load_config *config) {
+uint16_t get_startup_addr(struct cpu *_unused, const struct load_config *config) {
+  (void)_unused;
   if (!config) {
-    return 0xFFFC; /* Default to reset vector */
+    return 0xFFFF; /* Default to reset vector */
   }
 
   if (!config->use_reset_vector) {
     return config->start_addr;
   }
 
-  /* Default: use reset vector (requires reading memory) */
-  if (c) {
-    /* Will be read from 0xFFFC-0xFFFD by rst() function */
-    return 0xFFFC;
-  }
-
-  return 0xFFFC;
+  /* Default: use reset vector (requires calling rst()) */
+  return 0xFFFF;
 }
 
 #endif /* BSOZ_LOADER_H */

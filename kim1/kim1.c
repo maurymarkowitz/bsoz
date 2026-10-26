@@ -15,7 +15,24 @@
 int k = 0x15; /* pending key from hexpad */
 int c = -1;   /* pending char from tty */
 
+/* Serial I/O state machine for KIM-1 RRIOT bit-bang serial */
+struct serial {
+  uint8_t tx_buf;    /* transmit buffer */
+  uint8_t rx_buf;    /* receive buffer */
+  uint8_t tx_count;  /* bits transmitted */
+  uint8_t rx_count;  /* bits received */
+  uint8_t tx_busy;   /* transmission in progress */
+  uint8_t rx_busy;   /* reception in progress */
+  uint8_t baud_div;  /* baud rate divider for timing */
+  uint16_t baud_clk; /* clock counter for baud timing */
+} serial = {0};
+
 struct cpu cpu;
+
+/* Statistics collection global - only defined when ENABLE_STATS is set */
+#if ENABLE_STATS
+struct cpu_stats step_stats = {0};
+#endif
 uint8_t mem[0x10000];
 uint16_t memsz = 1024;
 
@@ -127,7 +144,15 @@ uint8_t w8(struct cpu *cpu, uint16_t addr, uint8_t b) {
     /* RRIOT 6530-002 */
     if (addr >= 0x1740 && addr <= 0x1743) {
       r2.reg[addr - 0x1740] = b;
-      if (addr == 0x1742) { /* TODO: special treatment for tty */
+      if (addr == 0x1740) {
+        /* Port A write: start serial transmission if not already busy */
+        if (!serial.tx_busy) {
+          serial.tx_buf = b;
+          serial.tx_count = 0;
+          serial.tx_busy = 1;
+        }
+      } else if (addr == 0x1742) {
+        /* Control register: could be used to enable/disable serial mode */
       }
     } else if (addr >= 0x1744 && addr <= 0x1747) {
       timer(&r2, rriot_inc[addr - 0x1744], b);
@@ -184,8 +209,72 @@ void hexpad(void) {
   }
 }
 
-void tty(void) { /* TODO: serial input and output */
+void tty(void) {
+  /* Handle serial I/O through RRIOT Port A (0x1740) and Port B (0x1741).
+   * KIM-1 serial uses bit-banged I/O:
+   * - Port A bit 7 (MSB) = RxD input
+   * - Port A bit 0 (LSB) = TxD output
+   * - Transmission: 1 start bit + 8 data bits + 1 stop bit (11 bits total)
+   * - Reception: same format
+   * - Baud rate derived from RRIOT timer
+   */
+
+  /* Read input from stdin if available */
+  uint8_t ch;
+  if (c == -1 && read(0, &ch, 1) == 1) {
+    c = ch;
+  }
+
+  /* Handle reception: load character into rx_buf when available */
+  if (!serial.rx_busy && c != -1) {
+    serial.rx_buf = c;
+    serial.rx_count = 0;
+    serial.rx_busy = 1;
+    serial.baud_clk = 0;
+    c = -1;
+  }
+
+  /* Handle transmission: send bits from tx_buf */
+  if (serial.tx_busy) {
+    serial.baud_clk++;
+    /* Assume baud timing is controlled by calling frequency.
+     * At typical step rate (~1MHz), we can send bits at 1200 baud.
+     * This is a simplified bit-bang: just shift out bits */
+    if (serial.tx_count < 11) {
+      uint8_t bit;
+      if (serial.tx_count == 0) {
+        bit = 0; /* start bit */
+      } else if (serial.tx_count <= 8) {
+        bit = (serial.tx_buf >> (serial.tx_count - 1)) & 1;
+      } else {
+        bit = 1; /* stop bit */
+      }
+      /* Update Port A bit 0 (TxD) */
+      r2.reg[1] = (r2.reg[1] & 0xFE) | bit;
+      serial.tx_count++;
+    } else {
+      serial.tx_busy = 0;
+    }
+  }
+
+  /* Handle reception: accumulate bits from Port A bit 7 (RxD) */
+  if (serial.rx_busy) {
+    serial.baud_clk++;
+    /* Sample RxD at bit boundaries */
+    if (serial.rx_count < 11) {
+      uint8_t bit = (r2.reg[1] >> 7) & 1;
+      if (serial.rx_count > 0 && serial.rx_count <= 8) {
+        serial.rx_buf |= (bit << (serial.rx_count - 1));
+      }
+      serial.rx_count++;
+    } else {
+      /* Reception complete, character is in serial.rx_buf */
+      serial.rx_busy = 0;
+      /* Could signal interrupt or make character available here */
+    }
+  }
 }
+
 
 /* Render digit b at position n (counted right-to-left) */
 void display(int n, uint8_t b) {

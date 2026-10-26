@@ -14,6 +14,11 @@ uint8_t mem[0x10000];
 uint16_t memsz = 0xffff;
 uint8_t ch;
 
+/* Statistics collection global - only defined when ENABLE_STATS is set */
+#if ENABLE_STATS
+struct cpu_stats step_stats = {0};
+#endif
+
 uint8_t r8(struct cpu *c, uint16_t addr) {
   (void)c;
   if (!ch) {
@@ -110,7 +115,7 @@ int main(int argc, char *argv[]) {
           fprintf(stderr, "Invalid file spec: %s\n", optarg);
           return 1;
         }
-        if (load_config_add_file(&loader_config, path, address) != 0) {
+        if (load_config_add_file(&loader_config, path, address, FORMAT_AUTO) != 0) {
           fprintf(stderr, "Error adding file: %s\n", path);
           return 1;
         }

@@ -1,12 +1,29 @@
+/**
+ * \file bsozdbg.h
+ * \brief 6502 CPU Disassembler and Debugger for BSOZ Emulator
+ *
+ * This header provides instruction disassembly and CPU state tracing.
+ * It is included conditionally in bsoz.h when BSOZ_DEBUG is enabled.
+ *
+ * IMPORTANT: This file assumes struct cpu is already defined.
+ * It should only be included from bsoz.h after the struct cpu definition.
+ */
+
 #ifndef BSOZDBG_H
 #define BSOZDBG_H
 
+#include <stdint.h>
 #include <stdio.h>
+#include "bsoz.h"
 
-struct cpu;
-
-void dump(struct cpu *cpu) {
-  /* clang-format on */
+/**
+ * \brief Print CPU state for debugging
+ *
+ * Displays all CPU registers, flags, stack contents, and program counter.
+ * Flags are shown in both hex and symbolic format (NVUBDIZC).
+ */
+static void dump(struct cpu *cpu) {
+  /* clang-format off */
   printf(
       "A:%02x  X:%02x  Y:%02x  S:%02x[%02x %02x %02x %02x]  "
       "F:%02x[%c%c%c%c%c%c%c%c]  PC:%04x ",
@@ -20,10 +37,20 @@ void dump(struct cpu *cpu) {
   /* clang-format on */
 }
 
-uint8_t disasm(struct cpu *c, uint8_t op) {
-  dump(c);
-  int a = r8(c, c->pc);
-  int b = r8(c, c->pc + 1);
+/**
+ * \brief Disassemble and print a 6502 instruction
+ *
+ * Decodes and prints a 6502 opcode with its operands and addressing mode.
+ * This function prints the CPU state BEFORE the instruction is executed.
+ *
+ * \param cpu Pointer to CPU state structure
+ * \param op The opcode byte to disassemble
+ * \return The opcode unchanged (allows use in switch statements)
+ */
+static uint8_t disasm(struct cpu *cpu, uint8_t op) {
+  dump(cpu);
+  int a = r8(cpu, cpu->pc);
+  int b = r8(cpu, cpu->pc + 1);
   switch (op) {
     case 0x00: printf("[%02X] BRK IMP\n", op); break;
     case 0x01: printf("[%02X] ORA ZIX  %02X\n", op, a); break;
