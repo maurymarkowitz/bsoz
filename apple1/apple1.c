@@ -9,6 +9,9 @@
 
 #include "rom.h"
 #include "../bsoz_loader.h"
+#include "../bsoz_args.h"
+
+int debug_enabled = 0;
 
 uint8_t mem[0x10000];
 uint16_t memsz = 0xffff;
@@ -94,6 +97,9 @@ int main(int argc, char *argv[]) {
   struct load_config loader_config;
   bool exclude_args[256] = {false};
   uint16_t start_addr = 0xFFFF;
+
+  /* Enable debug output if --debug or -d flag is present */
+  debug_enabled = has_debug_flag(argc, argv);
 
   /* Initialize loader config */
   load_config_init(&loader_config);
